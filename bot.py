@@ -2,19 +2,36 @@ import asyncio
 import hashlib
 import logging
 import yt_dlp
+import os
+import base64
 from aiogram import Bot, Dispatcher, Router, types, F
 from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import Command
 from concurrent.futures import ThreadPoolExecutor
-import os
 from dotenv import load_dotenv
 
+# .env faylni o'qish (Render yoki lokal)
 load_dotenv()
-print(os.getenv("BOT_TOKEN"))
 
-# Telegram bot tokenini to'g'ridan-to'g'ri belgilash
-BOT_TOKEN = '7539307597:AAHL71GMS3RA72e_V1CNdaOEEyzpHgQPWco'  # Bu yerda o'z tokeningizni kiriting
+# Tokenni .env dan olish (xavfsiz!)
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN topilmadi! .env faylga qo'shing.")
 
+# === COOKIES SOZLASH (YANGI) ===
+COOKIES_FILE = "/tmp/cookies.txt"  # Render'da /tmp ishlaydi
+
+# Render'da base64 dan cookies.txt yaratish
+cookies_base64 = os.getenv('INSTAGRAM_COOKIES_BASE64')
+if cookies_base64 and not os.path.exists(COOKIES_FILE):
+    try:
+        with open(COOKIES_FILE, 'wb') as f:
+            f.write(base64.b64decode(cookies_base64))
+        logging.info("Cookies fayli yaratildi (Render'da).")
+    except Exception as e:
+        logging.error(f"Cookies yaratishda xato: {e}")
+
+# === BOT ===
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
@@ -22,12 +39,12 @@ router = Router()
 # Loglarni sozlash
 logging.basicConfig(level=logging.INFO)
 
-# 📌 SSD yoki RAM'da saqlash
+# Yuklash papkasi
 DOWNLOAD_PATH = "/tmp/downloads/"
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
-# ✅ FFmpeg yo'li (Siz bergan yo‘l)
-FFMPEG_PATH = r'C:\Users\pc\ffmpeg-2025-02-13-git-19a2d26177-essentials_build\bin'
+# FFmpeg yo'li (Render'da kerak emas, chunki u o'rnatilgan)
+FFMPEG_PATH = None  # Render'da None bo'lsin
 
 executor = ThreadPoolExecutor()
 
@@ -35,22 +52,26 @@ def get_video_filename(video_url):
     return os.path.join(DOWNLOAD_PATH, f"{hashlib.md5(video_url.encode()).hexdigest()}.mp4")
 
 async def download_instagram_video(video_url):
-    """ 📌 Instagramdan video yuklab olish (yt-dlp orqali) """
+    """ Instagramdan video yuklash + COOKIES """
     file_path = get_video_filename(video_url)
 
     ydl_opts = {
-        'ffmpeg_location': FFMPEG_PATH,  # FFmpeg yo'lini qo'shish
         'outtmpl': file_path,
         'format': 'bv+ba/b',
         'merge_output_format': 'mp4',
         'quiet': True,
         'noplaylist': True,
         'retries': 5,
-        'fragment-retries': 10,
-        'http-chunk-size': '50M',
-        'progress_hooks': [lambda d: logging.info(f"Downloading: {d['_percent_str']}")],
-
+        'fragment_retries': 10,
+        'http_chunk_size': '50M',
+        'sleep_interval': 5,  # Rate-limit uchun
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        'cookies': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,  # COOKIES QO‘SHILDI
     }
+
+    # FFmpeg faqat lokalda kerak
+    if FFMPEG_PATH and os.name == 'nt':  # Windows
+        ydl_opts['ffmpeg_location'] = FFMPEG_PATH
 
     try:
         loop = asyncio.get_running_loop()
@@ -58,56 +79,53 @@ async def download_instagram_video(video_url):
 
         if os.path.exists(file_path):
             return file_path
-        raise Exception("Video manzilini qabul qilaman.")
+        raise Exception("Video yuklanmadi.")
     except Exception as e:
-        logging.error(f"🚨 Iltimos video fayl yuboring: {video_url} - {str(e)}")
+        logging.error(f"Yuklash xatosi: {video_url} - {str(e)}")
         raise
 
+# === /start ===
 @router.message(Command("start"))
 async def start_command(message: Message):
-    """ 🚀 /start buyrug‘i foydalanuvchini kutib oladi """
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        #[InlineKeyboardButton(text="📥 Yangi video yuklash", callback_data="new_video")],
-        [InlineKeyboardButton(text="ℹ️ start", callback_data="help")],
+        [InlineKeyboardButton(text="ℹ️ Yordam", callback_data="help")],
     ])
-
     await message.answer(
-        "🎉 Assalomu alaykum! \n\n"
-        "Bu bot Instagram videolarini yuklab berish uchun @Temurbek_T_H tomonidan yaratilgan. "
-             "Pastdagi tugmani bosing. 🚀",
+        "Assalomu alaykum! \n\n"
+        "Instagram videolarini yuklab beraman. Havola yuboring! \n"
+        "@Temurbek_T_H tomonidan yaratilgan.",
         reply_markup=keyboard
     )
 
-# 📌 Tugmalarni ishlashini ta'minlash
-@router.callback_query(F.data == "new_video")
-async def new_video_handler(callback: CallbackQuery):
-    await callback.message.answer("📥 Video yuklash uchun Instagram havolasini yuboring!")
-    await callback.answer()
-
+# === Tugmalar ===
 @router.callback_query(F.data == "help")
 async def help_handler(callback: CallbackQuery):
-    await callback.message.answer("ℹ️ Instagram videolarini yuklab olish uchun videoning havolasini yuboring!")
+    await callback.message.answer("Instagram havolasini yuboring — video yuklab beraman!")
     await callback.answer()
 
+# === Instagram havolasi ===
 @router.message(F.text.contains("instagram.com"))
 async def process_instagram_video(message: Message):
     video_url = message.text.strip()
 
-    progress_msg = await message.answer("🔄 Yuklanmoqda.")
+    progress_msg = await message.answer("Yuklanmoqda... ⏳")
 
     try:
         file_path = await download_instagram_video(video_url)
         await progress_msg.delete()
 
-        await message.answer_document(FSInputFile(file_path), caption="✅ Sizni videoingiz tayyor! "
-                                                                      " Ushbu video @video_insta_yuklabot tomonidan yuklandi!")
+        await message.answer_document(
+            FSInputFile(file_path),
+            caption="Sizning videoingiz tayyor! \n@video_insta_yuklabot"
+        )
+        os.remove(file_path)  # Joy tejash
     except Exception as e:
-        await progress_msg.edit_text(f"❌ Xatolik yuz berdi: {str(e)}")
+        await progress_msg.edit_text(f"Xatolik: {str(e)}\n\nCookies yangilang yoki rate-limit.")
 
+# === Main ===
 async def main():
     logging.info("Bot ishga tushdi...")
 
-    # Router'ni faqat bir marta qo‘shamiz
     if not router.parent_router:
         dp.include_router(router)
 

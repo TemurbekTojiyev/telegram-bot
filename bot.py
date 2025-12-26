@@ -10,68 +10,64 @@ from aiogram.filters import Command
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-# .env faylni o'qish (Render yoki lokal)
+# .env yuklash
 load_dotenv()
 
-# Tokenni .env dan olish (xavfsiz!)
+# Token
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN topilmadi! .env faylga qo'shing.")
+    raise ValueError("BOT_TOKEN .env faylda topilmadi!")
 
-# === COOKIES SOZLASH (YANGI) ===
-COOKIES_FILE = "/tmp/cookies.txt"  # Render'da /tmp ishlaydi
+# === COOKIES SOZLASH (ISHONCHLI ISHLASH UCHUN) ===
+COOKIES_FILE = "/tmp/instagram_cookies.txt"  # /tmp Render'da ishlaydi
 
-# Render'da base64 dan cookies.txt yaratish
 cookies_base64 = os.getenv('INSTAGRAM_COOKIES_BASE64')
 if cookies_base64 and not os.path.exists(COOKIES_FILE):
     try:
         with open(COOKIES_FILE, 'wb') as f:
             f.write(base64.b64decode(cookies_base64))
-        logging.info("Cookies fayli yaratildi (Render'da).")
+        logging.info("Cookies fayli yaratildi.")
     except Exception as e:
         logging.error(f"Cookies yaratishda xato: {e}")
 
-# === BOT ===
+# Bot va dispatcher
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 router = Router()
 
-# Loglarni sozlash
+# Logging
 logging.basicConfig(level=logging.INFO)
 
 # Yuklash papkasi
 DOWNLOAD_PATH = "/tmp/downloads/"
 os.makedirs(DOWNLOAD_PATH, exist_ok=True)
 
-# FFmpeg yo'li (Render'da kerak emas, chunki u o'rnatilgan)
-FFMPEG_PATH = None  # Render'da None bo'lsin
+# Executor
+executor = ThreadPoolExecutor(max_workers=4)
 
-executor = ThreadPoolExecutor()
+def get_video_filename(video_url: str) -> str:
+    filename = hashlib.md5(video_url.encode()).hexdigest() + ".mp4"
+    return os.path.join(DOWNLOAD_PATH, filename)
 
-def get_video_filename(video_url):
-    return os.path.join(DOWNLOAD_PATH, f"{hashlib.md5(video_url.encode()).hexdigest()}.mp4")
-
-async def download_instagram_video(video_url):
-    """ Instagramdan video yuklash + COOKIES """
+async def download_instagram_video(video_url: str) -> str:
+    file_path = get_video_filename(video_url)
+# Yangi variant
+async def download_instagram_video(video_url: str) -> str:
     file_path = get_video_filename(video_url)
 
     ydl_opts = {
-        'outtmpl': file_path,
-        'format': 'bv+ba/b',
+        'outtmpl': file_path,  # .mp4 bilan to'liq yo'l
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'merge_output_format': 'mp4',
         'quiet': True,
         'noplaylist': True,
-        'retries': 5,
-        'fragment_retries': 10,
-        'http_chunk_size': '50M',
-        'sleep_interval': 5,  # Rate-limit uchun
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'cookies': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,  # COOKIES QO‘SHILDI
+        'retries': 15,
+        'fragment_retries': 15,
+        'concurrent_fragment_downloads': 5,  # 16 juda yuqori bo'lishi mumkin
+        'sleep_interval': 2,
+        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)...',
+        'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,  # cookiefile emas, cookies emas
     }
-
-    # FFmpeg faqat lokalda kerak
-    if FFMPEG_PATH and os.name == 'nt':  # Windows
-        ydl_opts['ffmpeg_location'] = FFMPEG_PATH
 
     try:
         loop = asyncio.get_running_loop()
@@ -79,58 +75,74 @@ async def download_instagram_video(video_url):
 
         if os.path.exists(file_path):
             return file_path
-        raise Exception("Video yuklanmadi.")
-    except Exception as e:
-        logging.error(f"Yuklash xatosi: {video_url} - {str(e)}")
-        raise
+        else:
+            raise Exception("Fayl yaratilmadi")
 
-# === /start ===
+    except Exception as e:
+        logging.error(f"Yuklash xatosi: {video_url} | {e}")
+        raise Exception("Video yuklanmadi. Havola private bo'lishi yoki cookies eskirgan.")
+
+# /start
 @router.message(Command("start"))
 async def start_command(message: Message):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="ℹ️ Yordam", callback_data="help")],
+        [InlineKeyboardButton(text="ℹ️ Yordam", callback_data="help")]
     ])
     await message.answer(
-        "Assalomu alaykum! \n\n"
-        "Instagram videolarini yuklab beraman. Havola yuboring! \n"
-        "@Temurbek_T_H tomonidan yaratilgan.",
+        "Assalomu alaykum! 👋\n\n"
+        "Instagram Reels, Post va IGTV videolarini yuklab beraman.\n"
+        "Havolani yuboring!\n\n",
         reply_markup=keyboard
     )
 
-# === Tugmalar ===
+# Yordam
 @router.callback_query(F.data == "help")
 async def help_handler(callback: CallbackQuery):
-    await callback.message.answer("Instagram havolasini yuboring — video yuklab beraman!")
+    await callback.message.answer(
+        "📹 Instagram havolasini yuboring (reel, p, tv).\n"
+        "• Public videolar yuklanadi\n"
+        "• @tima_tojiyev 👮‍♀️ admin bilan bog'laning)\n"
+        "• Stories yuklanmaydi"
+    )
     await callback.answer()
 
-# === Instagram havolasi ===
-@router.message(F.text.contains("instagram.com"))
+# Instagram havolasi
+@router.message(F.text.regexp(r"https?://(www\.)?instagram\.com/(p|reel|tv)/"))
 async def process_instagram_video(message: Message):
     video_url = message.text.strip()
 
-    progress_msg = await message.answer("Yuklanmoqda... ⏳")
+    progress = await message.answer("⏳ Yuklanmoqda👀... Kuting🙂...")
 
     try:
         file_path = await download_instagram_video(video_url)
-        await progress_msg.delete()
 
-        await message.answer_document(
+        await progress.delete()
+
+        await message.answer_video(
             FSInputFile(file_path),
-            caption="Sizning videoingiz tayyor! \n@video_insta_yuklabot"
+            caption="✅ Video tayyor!\n\n@video_insta_yuklabot",
+            supports_streaming=True,  # Muhim: bu tezroq yuklash va o‘ynatish imkonini beradi
+            width=1080,               # ixtiyoriy: agar bilasangiz
+            height=1920,              # ixtiyoriy: Reels uchun odatda 1080x1920
+            duration=None             # avto aniqlaydi
         )
-        os.remove(file_path)  # Joy tejash
-    except Exception as e:
-        await progress_msg.edit_text(f"Xatolik: {str(e)}\n\nCookies yangilang yoki rate-limit.")
 
-# === Main ===
+        # Fayl o'chirish
+        try:
+            os.remove(file_path)
+        except:
+            pass
+
+    except Exception as e:
+        await progress.edit_text(f"❌ Xato: {str(e)}\n\nCookiesni yangilang yoki public havola yuboring.")
+
+# Main
 async def main():
     logging.info("Bot ishga tushdi...")
-
-    if not router.parent_router:
-        dp.include_router(router)
-
+    dp.include_router(router)
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot, skip_updates=True)
+    await dp.start_polling(bot)
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     asyncio.run(main())
+    
